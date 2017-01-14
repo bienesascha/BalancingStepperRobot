@@ -23,4 +23,5 @@ Using:
 <li>Connector for the wheels to the motor axis*2</li>
 
 </ul>
-!!! Not working jet !!!
+
+<b>!!! Not working jet !!!</b>
