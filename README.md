@@ -19,8 +19,8 @@ Using:
 <li>wires witg dupond connectors*many</li>
 <li>switch*1</li>
 <li>(ESP-01 incl level shifter)</li>
-<li>Wheels*2</li>
-<li>Connector for the wheels to the motor axis*2</li>
+<li>RC Off-Road Buggy Maschenform-Rad-Reifen und Felgen OD 85 mm*2</li>
+<li>Connector for the wheels (hex12mm) to the motor axis*2</li>
 
 </ul>
 
