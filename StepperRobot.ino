@@ -258,9 +258,9 @@ void delay_1us()
 // TIMER 1 : STEPPER MOTOR1 SPEED CONTROL
 ISR(TIMER1_COMPA_vect)
 {
-  OCR1A += pulse_M1;
   if (dir_M1 == 0) // If we are not moving we dont generate a pulse
     return;
+  OCR1A += pulse_M1;
   // We generate 1us STEP pulse
   digitalWrite(PIN_step_M1, HIGH); // STEP MOTOR 1
   delay_1us();
@@ -270,9 +270,9 @@ ISR(TIMER1_COMPA_vect)
 // TIMER 1 : STEPPER MOTOR2 SPEED CONTROL
 ISR(TIMER1_COMPB_vect)
 {
-  OCR1B += pulse_M2;
   if (dir_M2 == 0) // If we are not moving we dont generate a pulse
     return;
+  OCR1B += pulse_M2;
   // We generate 1us STEP pulse
   digitalWrite(PIN_step_M2, HIGH); // STEP MOTOR 2
   delay_1us();
@@ -418,15 +418,15 @@ void readControlParameters()
     }
     newControlParameters = true;
   }
-*/
   if ((newControlParameters) && (!modifing_control_parameters))
   {
     // Reset parameters
-/*    OSC.fadder1 = 0.5;
+    OSC.fadder1 = 0.5;
     OSC.fadder2 = 0.5;
-*/    //OSC.toggle1 = 0;
+    //OSC.toggle1 = 0;
     newControlParameters = false;
   }
+*/
 }
 
 #ifdef WIFI_ESP
@@ -578,12 +578,14 @@ void setup()
     Serial.print("DMP Initialization failed (code ");
     Serial.print(devStatus);
     Serial.println(")");
+
+    while(1){}; // stop program here <<--------------------STOP
   }
 
   // Gyro calibration
   // The robot must be steady during initialization
   delay(500);
-  Serial.println("Gyro calibration!!  Dont move the robot in 10 seconds... ");
+  Serial.print("Gyro calibration!!  Don't move the robot for 30 seconds... ");
   delay(500);
 
 #ifdef WIFI_ESP
@@ -619,10 +621,11 @@ void setup()
   ESPsendCommand("AT+CIPSTART=\"UDP\",\"192.168.4.2\",2223,2222,0", "OK", 3);
   delay(250);
   ESPsendCommand("AT+CIPSEND", ">", 2); // Start transmission (transparent mode)
-  delay(5000);   // Time to settle things... the bias_from_no_motion algorithm needs some time to take effect and reset gyro bias.
+  delay(25000);   // Time to settle things... the bias_from_no_motion algorithm needs some time to take effect and reset gyro bias.
 #else
-  delay(10000);   // Time to settle things... the bias_from_no_motion algorithm needs some time to take effect and reset gyro bias.
+  delay(30000);   // Time to settle things... the bias_from_no_motion algorithm needs some time to take effect and reset gyro bias.
 #endif
+  Serial.println(" ... DONE!");
 
   // Verify connection
   Serial.println("Testing device connections...");
@@ -682,7 +685,7 @@ void setup()
 }
 
 
-// MAIN LOOP
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////
 void loop()
 {
   // If we run out of battery, we do nothing... STOP
@@ -711,3 +714,262 @@ void loop()
       if ((mode == 0) && (OSC.toggle1))
       {
         // Change to PRO mode
+        max_throttle = MAX_THROTTLE_PRO;
+        max_steering = MAX_STEERING_PRO;
+        max_target_angle = MAX_TARGET_ANGLE_PRO;
+        mode = 1;
+      }
+      if ((mode == 1) && (OSC.toggle1 == 0))
+      {
+        // Change to NORMAL mode
+        max_throttle = MAX_THROTTLE;
+        max_steering = MAX_STEERING;
+        max_target_angle = MAX_TARGET_ANGLE;
+        mode = 0;
+      }
+    }
+#if DEBUG==1
+    Serial.print(throttle);
+    Serial.print(" ");
+    Serial.println(steering);
+#endif
+  } // End new OSC message
+*/
+
+
+
+///////////////throttle = ....        steering = .......
+  timer_value = millis();
+
+  // New DMP Orientation solution?
+  fifoCount = mpu.getFIFOCount();
+  if (fifoCount >= 18)
+  {
+    if (fifoCount > 18) // If we have more than one packet we take the easy path: discard the buffer and wait for the next one
+    {
+      Serial.println("FIFO RESET!!");
+      mpu.resetFIFO();
+      return;
+    }
+    loop_counter++;
+    slow_loop_counter++;
+    dt = (timer_value - timer_old);  // time diff since last loop
+    timer_old = timer_value;
+
+    angle_adjusted_Old = angle_adjusted;    
+    angle_adjusted = dmpGetPhi();  // Get new orientation angle from IMU (MPU6050)
+
+
+//Serial.print("--dmpGetPhi ");
+//Serial.println(angle_adjusted);
+
+
+#if DEBUG==8
+    Serial.print(throttle);
+    Serial.print(" ");
+    Serial.print(steering);
+    Serial.print(" ");
+    Serial.println(mode);
+#endif
+
+
+    mpu.resetFIFO();  // We always reset FIFO
+
+    // We calculate the estimated robot speed:
+    // Estimated_Speed = angular_velocity_of_stepper_motors(combined) - angular_velocity_of_robot(angle measured by IMU)
+    actual_robot_speed_Old = actual_robot_speed;
+    actual_robot_speed = (speed_M1 + speed_M2) / 2; // Positive: forward
+
+    int16_t angular_velocity = (angle_adjusted - angle_adjusted_Old) * 90.0; // 90 is an empirical extracted factor to adjust for real units
+    int16_t estimated_speed = -actual_robot_speed_Old - angular_velocity;     // We use robot_speed(t-1) or (t-2) to compensate the delay
+    estimated_speed_filtered = estimated_speed_filtered * 0.95 + (float)estimated_speed * 0.05;  // low pass filter on estimated speed
+
+
+    // SPEED CONTROL: This is a PI controller.
+    //    input:user throttle, variable: estimated robot speed, output: target robot angle to get the desired speed
+    target_angle = speedPIControl(dt, estimated_speed_filtered, throttle, Kp_thr, Ki_thr);
+    target_angle = constrain(target_angle, -max_target_angle, max_target_angle); // limited output
+
+
+
+    // Stability control: This is a PD controller.
+    //    input: robot target angle(from SPEED CONTROL), variable: robot angle, output: Motor speed
+    //    We integrate the output (sumatory), so the output is really the motor acceleration, not motor speed.
+    control_output += stabilityPDControl(dt, angle_adjusted, target_angle, Kp, Kd);
+    control_output = constrain(control_output, -MAX_CONTROL_OUTPUT, MAX_CONTROL_OUTPUT); // Limit max output from control
+
+    // The steering part from the user is injected directly on the output
+    motor1 = control_output + steering;
+    motor2 = control_output - steering;
+
+    // Limit max speed (control output)
+    motor1 = constrain(motor1, -MAX_CONTROL_OUTPUT, MAX_CONTROL_OUTPUT);
+    motor2 = constrain(motor2, -MAX_CONTROL_OUTPUT, MAX_CONTROL_OUTPUT);
+
+
+
+    // NOW we send the commands to the motors
+    if ((angle_adjusted < 76) && (angle_adjusted > -76)) // Is robot ready (upright?)
+    {
+      // NORMAL MODE
+      digitalWrite(PIN_enable_a4988, LOW);  // Motors enable
+      setMotorSpeedM1(motor1);
+      setMotorSpeedM2(motor2);
+
+      servo1.write(map(90, 0, 180, MIN_PULSE , MAX_PULSE )); // NEW LUD move arm upright 
+ /* 
+      // Push1 Move servo arm
+      if (OSC.push1)  // Move arm
+      { 
+        // Update to correct bug when the robot is lying backward
+        if (angle_adjusted > -40)
+          servo1.write(map(0, 0, 180, MIN_PULSE , MAX_PULSE ));
+        else
+          servo1.write(map(180, 0, 180, MIN_PULSE , MAX_PULSE ));
+      }
+      else
+        servo1.write(map(90, 0, 180, MIN_PULSE , MAX_PULSE ));
+
+      // Push2 reset controls to neutral position
+      if (OSC.push2)
+      {
+        OSC.fadder1 = 0.5;
+        OSC.fadder2 = 0.5;
+      }
+*/
+      // Normal condition?
+      if ((angle_adjusted < 45) && (angle_adjusted > -45))
+      {
+        Kp = Kp_user;            // Default user control gains
+        Kd = Kd_user;
+        Kp_thr = Kp_thr_user;
+        Ki_thr = Ki_thr_user;
+      }
+      else    // We are in the raise up procedure => we use special control parameters
+      {
+        Kp = KP_RAISEUP;         // CONTROL GAINS FOR RAISE UP
+        Kd = KD_RAISEUP;
+        Kp_thr = KP_THROTTLE_RAISEUP;
+        Ki_thr = KI_THROTTLE_RAISEUP;
+      }
+
+    }
+    else   // Robot not ready (flat), angle > 70º => ROBOT OFF
+    {
+      digitalWrite(PIN_enable_a4988, HIGH);  // Disable motors
+      setMotorSpeedM1(0);
+      setMotorSpeedM2(0);
+    
+      PID_errorSum = 0;  // Reset PID I term
+      Kp = KP_RAISEUP;   // CONTROL GAINS FOR RAISE UP
+      Kd = KD_RAISEUP;
+      Kp_thr = KP_THROTTLE_RAISEUP;
+      Ki_thr = KI_THROTTLE_RAISEUP;
+ /* 
+      // if we pulse push1 button we raise up the robot with the servo arm
+      if (OSC.push1)
+      {
+        // Because we know the robot orientation (face down of face up), we move the servo in the appropiate direction for raise up
+        if (angle_adjusted > 0)
+          servo1.write(map(0, 0, 180, MIN_PULSE , MAX_PULSE ));
+        else
+          servo1.write(map(180, 0, 180, MIN_PULSE , MAX_PULSE ));
+      }
+      else
+        servo1.write(map(90, 0, 180, MIN_PULSE , MAX_PULSE ));
+ */
+      // NEW by LUD
+      // if we pulse push1 button we raise up the robot with the servo arm
+      
+      // Because we know the robot orientation (face down of face up), we move the servo in the appropiate direction for raise up
+      if (angle_adjusted > 0)
+          servo1.write(map(0, 0, 180, MIN_PULSE , MAX_PULSE ));
+      else
+          servo1.write(map(180, 0, 180, MIN_PULSE , MAX_PULSE ));
+      
+      //servo1.write(map(90, 0, 180, MIN_PULSE , MAX_PULSE ));
+        
+    }
+
+
+#if DEBUG>=1
+    Serial.print("aa ");
+    Serial.print(angle_adjusted);
+
+    //Serial.print(" estimated_speed_filtered ");
+    //Serial.print(estimated_speed_filtered);
+
+    Serial.print(" at ");
+    Serial.print(target_angle);
+    Serial.print(" co ");
+    Serial.print(control_output);
+    Serial.print(" aj ");
+    Serial.print(angle_adjusted);
+
+    Serial.print(" ");
+    Serial.print(motor1);
+    Serial.print(" ");
+    Serial.println(motor2);
+#endif
+    
+    // Check for new user control parameters
+    readControlParameters();
+
+  } // End of new IMU data
+
+  // Medium loop 40Hz
+  if (loop_counter >= 5)
+  {
+    loop_counter = 0;
+    // We do nothing here now...
+#if DEBUG==10
+    Serial.print(angle_adjusted);
+    Serial.print(" ");
+    Serial.println(debugVariable);
+#endif
+  } // End of medium loop
+
+  if (slow_loop_counter >= 99) // 2Hz
+  {
+    slow_loop_counter = 0;
+    // Read  status
+#if BATTERY_CHECK==1
+    int BatteryValue = readBattery();
+    sendBattery_counter++;
+    if (sendBattery_counter >= 10) { //Every 5 seconds we send a message
+      sendBattery_counter = 0;
+#if LIPOBATT==0
+      // From >10.6 volts (100%) to 9.2 volts (0%) (aprox)
+      float value = constrain((BatteryValue - 92) / 14.0, 0.0, 1.0);
+#else
+      // For Lipo battery use better this config: (From >11.5v (100%) to 9.5v (0%)
+      float value = constrain((BatteryValue - 95) / 20.0, 0.0, 1.0);
+#endif
+      //Serial.println(value);
+/*      OSC.MsgSend("/1/rotary1\0\0,f\0\0\0\0\0\0", 20, value); */
+    }
+    //if (Battery_value < BATTERY_WARNING){
+    //  Serial.print("LOW BAT!! ");
+    //  }
+#endif   // BATTERY_CHECK
+#if DEBUG==6
+    Serial.print("B:");
+    Serial.println(BatteryValue);
+#endif
+#if SHUTDOWN_WHEN_BATTERY_OFF==1
+
+    if (readBattery(); < BATTERY_SHUTDOWN)
+    {
+      // Robot shutdown !!!
+      Serial.println("LOW BAT!! SHUTDOWN");
+      Robot_shutdown = true;
+      // Disable steppers
+      digitalWrite(4, HIGH);  // Disable motors
+    }
+#endif
+
+  }  // End of slow loop
+}
+
+
+
